@@ -9,7 +9,7 @@ from pathlib import Path
 
 SECRET_NAME_RE = re.compile(
     r"""(^|[\\/])(
-        \.env(\.(?!example$|sample$|template$|dist$)[\w.-]+)? |   # .env, .env.local (not .env.example)
+        [\w.-]*\.env(\.(?!example$|sample$|template$|dist$)[\w.-]+)? |   # .env, test.env, .env.local (not .env.example)
         id_rsa | id_ed25519 | id_ecdsa | id_dsa |
         .*\.pem | .*\.key | .*\.p12 | .*\.pfx | .*\.keystore | .*\.jks |
         credentials(\.json)? | \.netrc | \.pgpass | \.npmrc | \.pypirc |
@@ -166,7 +166,7 @@ def check_file_tool(tool: str, ti: dict, cwd: Path, project: Path):
         return "deny", f"{tool} on secret file '{path}', keep keys out of the agent's context"
     if tool in ("Grep", "Glob"):
         pat = str(ti.get("pattern", "")) + " " + str(ti.get("glob", ""))
-        if re.search(r"\.env\b|id_rsa|\.pem\b|credentials", pat, re.I):
+        if re.search(r"\.env\b|\benv\b|id_rsa|\.pem\b|credentials", pat, re.I):
             return "deny", f"{tool} pattern targets secret files"
     if tool in ("Write", "Edit", "MultiEdit", "NotebookEdit") and path:
         p = _resolve(path, cwd)
