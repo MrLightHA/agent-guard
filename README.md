@@ -29,7 +29,16 @@ Approving every command by hand doesn't scale, so people turn approvals off. age
 
 Everything else passes. `rm -rf node_modules`, `.env.example`, normal edits are untouched.
 
-Every tool call is logged to `~/.agent-guard/log.jsonl`.
+Every tool call is logged to `~/.agent-guard/log.jsonl`:
+
+```json
+{"ts": "2026-10-18T20:13:17", "tool": "Glob", "input": "**/.env*", "decision": "deny", "reason": "Glob pattern targets secret files"}
+{"ts": "2026-10-18T20:14:57", "tool": "Bash", "input": "rm -rf \"../addon-template\"", "decision": "deny", "reason": "rm targets '../addon-template' outside the project (C:\\demo\\my-app)"}
+{"ts": "2026-10-18T20:15:43", "tool": "Bash", "input": "git status --short", "decision": "pass", "reason": null}
+{"ts": "2026-10-18T20:18:31", "tool": "Bash", "input": "git reset --hard && git status --short", "decision": "ask", "reason": "git reset --hard discards uncommitted work"}
+```
+
+The `rm -rf` above was a real save: the folder held an addon with uncommitted work that existed nowhere else.
 
 ## Install
 
