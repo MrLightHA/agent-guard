@@ -15,6 +15,22 @@ AI coding agents are fast, including at destroying things:
 
 Approving every command by hand doesn't scale, so people turn approvals off. agent-guard sits in between: normal work runs untouched, the catastrophic stuff gets stopped.
 
+## What it looks like
+
+The agent tries to find `.env` and gets stopped at the search step:
+
+![.env blocked](docs/env-blocked.png)
+
+`rm -rf` on a folder outside the project:
+
+![rm blocked](docs/rm-blocked.png)
+
+Risky but sometimes legit commands ask you first:
+
+![git reset asks](docs/reset-ask.png)
+
+In every case the agent did not try to work around the guard.
+
 ## What it blocks
 
 | Category | Examples | Action |
