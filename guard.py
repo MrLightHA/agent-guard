@@ -3,6 +3,7 @@ import json
 import os
 import re
 import shlex
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -23,6 +24,71 @@ SECRET_DIR_RE = re.compile(r"(^|[\\/])(\.ssh|\.aws|\.gnupg|\.kube|\.docker|\.con
 def is_secret_path(p: str) -> bool:
     p = p.strip().strip("'\"")
     return bool(SECRET_NAME_RE.search(p) or SECRET_DIR_RE.search(p))
+
+
+SECRET_VALUES = [
+    (r"\bAKIA[0-9A-Z]{16}\b", "AWS access key"),
+    (r"\bgh[pousr]_[A-Za-z0-9]{36,}\b", "GitHub token"),
+    (r"\bgithub_pat_[A-Za-z0-9_]{60,}\b", "GitHub token"),
+    (r"\bsk-ant-[A-Za-z0-9_-]{20,}", "Anthropic API key"),
+    (r"\bsk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{32,}", "OpenAI API key"),
+    (r"\b[rs]k_live_[0-9A-Za-z]{20,}\b", "Stripe live key"),
+    (r"\bxox[abprs]-[A-Za-z0-9-]{10,}\b", "Slack token"),
+    (r"\bAIza[0-9A-Za-z_-]{35}\b", "Google API key"),
+    (r"\b\d{8,10}:AA[A-Za-z0-9_-]{33}\b", "Telegram bot token"),
+    (r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----", "private key"),
+]
+SECRET_VALUES = [(re.compile(rx), name) for rx, name in SECRET_VALUES]
+PLACEHOLDER_RE = re.compile(r"example|x{4,}|0{6,}|your|dummy|placeholder|fake|test_?key|\.\.\.", re.I)
+
+
+def find_secret(text: str):
+    if not text:
+        return None
+    for rx, name in SECRET_VALUES:
+        for m in rx.finditer(text):
+            v = m.group(0)
+            if name != "private key" and (PLACEHOLDER_RE.search(v) or len(set(v)) < 10):
+                continue
+            return name
+    return None
+
+
+def redact(text):
+    if not isinstance(text, str):
+        return text
+    for rx, _ in SECRET_VALUES:
+        text = rx.sub(lambda m: m.group(0)[:6] + "...[redacted]", text)
+    return text
+
+
+def _git(cwd: Path, *args) -> str:
+    try:
+        r = subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, timeout=5)
+        return r.stdout.decode("utf-8", errors="replace") if r.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def check_commit(toks, cwd: Path):
+    all_flag = "--all" in toks or any(t.startswith("-") and not t.startswith("--") and "a" in t for t in toks[2:])
+    names = _git(cwd, "diff", "--cached", "--name-only").split()
+    diff = _git(cwd, "diff", "--cached", "-U0")
+    if all_flag:
+        names += _git(cwd, "diff", "--name-only").split()
+        diff += _git(cwd, "diff", "-U0")
+    for n in names:
+        if is_secret_path(n):
+            return "deny", f"commit includes secret file '{n}'"
+    current = "?"
+    for line in diff[:2_000_000].splitlines():
+        if line.startswith("+++ "):
+            current = line[6:] if line.startswith("+++ b/") else line[4:]
+        elif line.startswith("+") and not line.startswith("+++"):
+            name = find_secret(line)
+            if name:
+                return "deny", f"commit adds a {name} in '{current}'"
+    return None
 
 
 SHELL_RULES = [
@@ -155,6 +221,18 @@ def check_bash(cmd: str, cwd: Path, project: Path):
             for t in toks[1:]:
                 if not t.startswith("-") and is_secret_path(t):
                     return "deny", f"command reads secret file '{t}'"
+        if len(toks) > 1 and os.path.basename(toks[0]) == "git":
+            if toks[1] == "add":
+                for t in toks[2:]:
+                    if not t.startswith("-") and is_secret_path(t):
+                        return "deny", f"git add of secret file '{t}'"
+            elif toks[1] == "commit":
+                r = check_commit(toks, cwd)
+                if r:
+                    return r
+    name = find_secret(cmd)
+    if name and re.search(r">|\btee\b|\bsed\s+-i|\bgit\s+commit|Set-Content|Out-File|Add-Content", cmd):
+        return "deny", f"command writes a {name} into a file, use an env variable instead"
     return worst
 
 
@@ -168,6 +246,12 @@ def check_file_tool(tool: str, ti: dict, cwd: Path, project: Path):
         pat = str(ti.get("pattern", "")) + " " + str(ti.get("glob", ""))
         if re.search(r"\.env\b|\benv\b|id_rsa|\.pem\b|credentials", pat, re.I):
             return "deny", f"{tool} pattern targets secret files"
+    if tool in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
+        parts = [ti.get("content"), ti.get("new_string"), ti.get("new_source")]
+        parts += [e.get("new_string") for e in ti.get("edits") or [] if isinstance(e, dict)]
+        name = find_secret("\n".join(str(x) for x in parts if x))
+        if name:
+            return "deny", f"{tool} writes a {name} into '{path}', use an env variable instead"
     if tool in ("Write", "Edit", "MultiEdit", "NotebookEdit") and path:
         p = _resolve(path, cwd)
         if not _inside(p, project):
@@ -201,7 +285,7 @@ def log(event: dict, result):
             "session": event.get("session_id"),
             "cwd": event.get("cwd"),
             "tool": event.get("tool_name"),
-            "input": ti.get("command") or ti.get("file_path") or ti.get("path") or ti.get("pattern"),
+            "input": redact(ti.get("command") or ti.get("file_path") or ti.get("path") or ti.get("pattern")),
             "decision": result[0] if result else "pass",
             "reason": result[1] if result else None,
         }

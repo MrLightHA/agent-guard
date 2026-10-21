@@ -40,10 +40,12 @@ In every case the agent did not try to work around the guard.
 | Infrastructure wipes | `terraform destroy`, `pulumi destroy`, Railway `volumeDelete`, `kubectl delete ns` | **deny** |
 | Database wipes | `DROP DATABASE`, `TRUNCATE`, `DELETE FROM x;` without `WHERE` | **deny** |
 | Reading secrets | `.env`, `id_rsa`, `*.pem`, `~/.aws/credentials`, `cat .env` | **deny** |
+| Hardcoding keys | writing an AWS, GitHub, OpenAI, Anthropic, Stripe, Slack, Google or Telegram key or a private key into a file | **deny** |
+| Committing secrets | `git add .env`, `git commit` when staged changes contain a key or a secret file | **deny** |
 | Remote code | `curl … \| bash` | **deny** |
 | Risky but sometimes legit | `git push --force`, `git reset --hard`, `printenv`, `$API_KEY`, writes outside the project | **ask you** |
 
-Everything else passes. `rm -rf node_modules`, `.env.example`, normal edits are untouched.
+Everything else passes. `rm -rf node_modules`, `.env.example`, normal edits are untouched. Obvious placeholders like `sk-your-key-here` or `AKIAIOSFODNN7EXAMPLE` are not treated as keys, and keys are redacted in the log.
 
 Every tool call is logged to `~/.agent-guard/log.jsonl`:
 
@@ -100,6 +102,26 @@ python install.py --uninstall   # remove the hook
 Running it again is safe: it updates the existing hook instead of adding a second one.
 
 **Not sure yet?** Set `AGENT_GUARD_MODE=warn` to only log, never block, and check `~/.agent-guard/log.jsonl` after a day of work.
+
+## With devcontainers
+
+[Dev containers](https://containers.dev/) isolate the agent from the rest of your machine, and you should use them if you can. They don't protect the project itself: the project folder is mounted from your disk, so `rm -rf` on it or on `.git` deletes real files, and `.env` plus any cloud or database tokens inside the container are still reachable by the agent.
+
+| | devcontainer | agent-guard | both |
+|---|---|---|---|
+| agent can't touch `~/.ssh`, other projects, your system | yes | partly | yes |
+| `rm -rf` of the project or `.git` | no | yes | yes |
+| reading `.env` in the project | no | yes | yes |
+| `terraform destroy` / dropping a DB with tokens in the container | no | yes | yes |
+| keys hardcoded into code or commits | no | yes | yes |
+
+To run it inside the container, add this to `.devcontainer/devcontainer.json`:
+
+```json
+"postCreateCommand": "git clone --depth 1 https://github.com/MrLightHA/agent-guard /tmp/agent-guard && python3 /tmp/agent-guard/install.py"
+```
+
+The installer runs inside the container and writes the hook to the container's `~/.claude/settings.json`, so it works no matter where Python lives on your host.
 
 ## Test
 

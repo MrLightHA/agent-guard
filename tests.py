@@ -51,9 +51,9 @@ CASES = [
 ]
 
 
-def run(tool, ti):
-    event = {"tool_name": tool, "tool_input": ti, "cwd": PROJECT, "session_id": "test", "hook_event_name": "PreToolUse"}
-    env = dict(os.environ, CLAUDE_PROJECT_DIR=PROJECT, AGENT_GUARD_LOG=str(HERE / ".test-log.jsonl"))
+def run(tool, ti, project=PROJECT):
+    event = {"tool_name": tool, "tool_input": ti, "cwd": project, "session_id": "test", "hook_event_name": "PreToolUse"}
+    env = dict(os.environ, CLAUDE_PROJECT_DIR=project, AGENT_GUARD_LOG=str(HERE / ".test-log.jsonl"))
     env.pop("AGENT_GUARD_MODE", None)
     out = subprocess.run([sys.executable, str(HERE / "guard.py")], input=json.dumps(event),
                          capture_output=True, text=True, env=env)
@@ -64,6 +64,34 @@ def run(tool, ti):
     return o["permissionDecision"], o["permissionDecisionReason"]
 
 
+import random
+import string
+import tempfile
+
+rnd = random.Random(7)
+def r(n, chars=string.ascii_letters + string.digits):
+    return "".join(rnd.choice(chars) for _ in range(n))
+
+GH = "gh" + "p_" + r(36)
+AWS = "AK" + "IA" + r(16, string.ascii_uppercase + string.digits)
+OAI = "sk-" + "proj-" + r(48)
+TG = "1234567890:" + "AA" + r(33)
+PEM = "-----BEGIN " + "OPENSSH PRIVATE KEY-----"
+
+CASES += [
+    ("Write", {"file_path": f"{PROJECT}/config.js", "content": f"const token = '{GH}';"}, "deny"),
+    ("Edit", {"file_path": f"{PROJECT}/settings.py", "old_string": "KEY = ''", "new_string": f"KEY = '{AWS}'"}, "deny"),
+    ("MultiEdit", {"file_path": f"{PROJECT}/bot.py", "edits": [{"old_string": "a", "new_string": f"TOKEN = '{TG}'"}]}, "deny"),
+    ("Write", {"file_path": f"{PROJECT}/id", "content": PEM + "\nabc"}, "deny"),
+    ("Bash", {"command": f"echo 'OPENAI_API_KEY={OAI}' > config.txt"}, "deny"),
+    ("Bash", {"command": "git add .env"}, "deny"),
+    ("Bash", {"command": "git add -f secrets.json"}, "deny"),
+    ("Write", {"file_path": f"{PROJECT}/.env.example", "content": "OPENAI_API_KEY=sk-your-key-here"}, None),
+    ("Write", {"file_path": f"{PROJECT}/config.py", "content": "AWS_KEY = 'AKIAIOSFODNN7EXAMPLE'"}, None),
+    ("Write", {"file_path": f"{PROJECT}/main.py", "content": "key = os.environ['OPENAI_API_KEY']"}, None),
+    ("Bash", {"command": "git add src/main.py README.md"}, None),
+]
+
 fails = 0
 for tool, ti, want in CASES:
     got, reason = run(tool, ti)
@@ -71,6 +99,44 @@ for tool, ti, want in CASES:
     fails += not ok
     label = ti.get("command") or ti.get("file_path") or ti.get("pattern")
     print(f"{'OK ' if ok else 'FAIL'} {tool:5} {str(got):5} (want {str(want):5}) {label[:60]}" + (f"  <- {reason}" if reason else ""))
+with tempfile.TemporaryDirectory() as d:
+    def git(*a):
+        subprocess.run(["git", *a], cwd=d, capture_output=True, check=True)
+    git("init", "-q")
+    git("config", "user.email", "t@t")
+    git("config", "user.name", "t")
+    Path(d, "main.py").write_text("print(1)\n")
+    git("add", "main.py")
+    git("commit", "-qm", "init")
+    Path(d, "main.py").write_text("print(2)\n")
+    git("add", "main.py")
+    Path(d, ".env").write_text("A=1\n")
+    Path(d, "cfg.py").write_text(f"T = '{GH}'\n")
+    results = []
+    got, reason = run("Bash", {"command": "git commit -m update"}, project=d)
+    results.append(("clean commit", got, None, reason))
+    git("add", "-f", ".env")
+    got, reason = run("Bash", {"command": "git commit -m update"}, project=d)
+    results.append((".env staged", got, "deny", reason))
+    git("reset", "-q", ".env")
+    git("add", "cfg.py")
+    got, reason = run("Bash", {"command": "git commit -m update"}, project=d)
+    results.append(("key staged", got, "deny", reason))
+    git("reset", "-q", "cfg.py")
+    Path(d, "main.py").write_text(f"T = '{GH}'\n")
+    got, reason = run("Bash", {"command": "git commit -am update"}, project=d)
+    results.append(("commit -a with key in tracked file", got, "deny", reason))
+    for name, got, want, reason in results:
+        ok = got == want
+        fails += not ok
+        CASES.append(None)
+        print(f"{'OK ' if ok else 'FAIL'} git   {str(got):5} (want {str(want):5}) {name}" + (f"  <- {reason}" if reason else ""))
+
+log = (HERE / ".test-log.jsonl").read_text(encoding="utf-8")
+leaked = OAI in log or GH in log
+fails += leaked
+CASES.append(None)
+print(f"{'FAIL' if leaked else 'OK '} log   secrets are redacted in log.jsonl")
 (HERE / ".test-log.jsonl").unlink(missing_ok=True)
 print(f"\n{len(CASES) - fails}/{len(CASES)} passed")
 sys.exit(1 if fails else 0)
