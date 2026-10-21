@@ -58,27 +58,46 @@ The `rm -rf` above was a real save: the folder held an addon with uncommitted wo
 
 ## Install
 
-1. Put `guard.py` somewhere permanent, e.g. `~/.agent-guard/guard.py`.
-2. Add this to `~/.claude/settings.json` (all projects) or `.claude/settings.json` (one project):
+Needs Python 3.8+.
 
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash|PowerShell|Read|Write|Edit|MultiEdit|NotebookEdit|Grep|Glob",
-        "hooks": [
-          { "type": "command", "command": "python3 ~/.agent-guard/guard.py" }
-        ]
-      }
-    ]
-  }
-}
+```
+git clone https://github.com/MrLightHA/agent-guard
+cd agent-guard
+python install.py
 ```
 
-On Windows use `python` and a full path, e.g. `python C:\\Users\\you\\.agent-guard\\guard.py`.
+On Windows use `py install.py` if `python` opens the Microsoft Store. No git? Download the ZIP from GitHub, unzip it and run the same command inside the folder.
 
-3. Restart Claude Code. Ask it to `cat .env` and it should refuse.
+The installer:
+
+- copies `guard.py` to `~/.agent-guard/`
+- adds the hook to `~/.claude/settings.json` without touching your other settings, plugins or hooks (a backup is saved as `settings.json.bak`)
+- writes the full path to the Python it was started with, so the hook doesn't depend on `PATH`
+- refuses to touch a broken `settings.json` and tells you where the error is
+- runs a self-check: blocks a `.env` read, blocks `rm -rf` outside a project, asks on `git reset --hard`, lets normal commands through
+
+```
+Self-check
+  [ok]   Python 3.12 at C:/Users/you/AppData/Local/Programs/Python/Python312/python.exe
+  [ok]   guard.py installed at C:/Users/you/.agent-guard/guard.py
+  [ok]   reading .env is blocked
+  [ok]   rm -rf outside the project is blocked
+  [ok]   git reset --hard asks first
+  [ok]   normal commands pass
+  [ok]   log is written
+```
+
+Then restart Claude Code, run `/hooks` to see it listed, and ask the agent to read your `.env`. It should refuse.
+
+Other options:
+
+```
+python install.py --project     # only this project (.claude/settings.json)
+python install.py --check       # is it installed and working?
+python install.py --uninstall   # remove the hook
+```
+
+Running it again is safe: it updates the existing hook instead of adding a second one.
 
 **Not sure yet?** Set `AGENT_GUARD_MODE=warn` to only log, never block, and check `~/.agent-guard/log.jsonl` after a day of work.
 
