@@ -39,6 +39,11 @@ SECRET_VALUES = [
     (r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----", "private key"),
 ]
 SECRET_VALUES = [(re.compile(rx), name) for rx, name in SECRET_VALUES]
+RISKY_SCRIPT_RE = re.compile(
+    r"\brm\s+(?:-\w+\s+)*-\w*[rR]\w*\s+(?:--\s+)?[\"']?(?:\$|~|/(?=[\s\"';]|$)|\*)[^\n]{0,60}"
+    r"|shutil\.rmtree\(\s*(?:os\.path\.expanduser|Path\.home|os\.environ|['\"]/['\"])[^\n]{0,60}"
+    r"|Remove-Item\b[^\n]*-Recurse[^\n]*\$(?:HOME|env:USERPROFILE)[^\n]{0,30}"
+)
 PLACEHOLDER_RE = re.compile(r"example|x{4,}|0{6,}|your|dummy|placeholder|fake|test_?key|\.\.\.", re.I)
 
 
@@ -171,7 +176,7 @@ def check_rm(segment: str, cwd: Path, project: Path):
 
     flags = "".join(t.lstrip("-") for t in tokens[1:] if t.startswith("-") and t != "--")
     recursive = "r" in flags.lower() or "--recursive" in tokens
-    targets = [t for t in tokens[1:] if not t.startswith("-")]
+    targets = [t for t in tokens[1:] if not t.startswith("-") and not re.match(r"^\d*[<>]", t)]
     if "--no-preserve-root" in tokens:
         return "deny", "rm --no-preserve-root"
 
@@ -180,6 +185,10 @@ def check_rm(segment: str, cwd: Path, project: Path):
             return "deny", f"rm targets '{t}' (home/root/whole directory)"
         if is_secret_path(t):
             return "deny", f"rm targets a secret/key file '{t}'"
+        if "$(" in t or "`" in t:
+            return ("deny" if recursive else "ask"), f"rm target '{t}' is computed at run time, where it points can't be checked"
+        if re.search(r"\$\{?\w", os.path.expandvars(os.path.expanduser(t))):
+            return ("deny" if recursive else "ask"), f"rm target '{t}' uses a variable that is not set here, where it points can't be checked"
         p = _resolve(t, cwd)
         if ".git" in p.parts:
             return "deny", "rm touches the .git directory (no undo after that)"
@@ -187,6 +196,8 @@ def check_rm(segment: str, cwd: Path, project: Path):
             return "deny", "rm would delete the whole project"
         if not _inside(p, project):
             return "deny", f"rm targets '{t}' outside the project ({project})"
+        if recursive and ".claude" in p.parts:
+            return "ask", f"recursive delete inside .claude ('{t}'), agent worktrees there may hold uncommitted work"
         if recursive and "*" in t and p.parent == project:
             return "ask", f"recursive wildcard delete in project root: '{t}'"
     if recursive and not targets:
@@ -226,6 +237,10 @@ def check_bash(cmd: str, cwd: Path, project: Path):
                 for t in toks[2:]:
                     if not t.startswith("-") and is_secret_path(t):
                         return "deny", f"git add of secret file '{t}'"
+            elif toks[1] == "rm":
+                flags = "".join(t.lstrip("-") for t in toks[2:] if t.startswith("-") and t != "--")
+                if "r" in flags and any(t in (".", "./", "*", ":/", ":/*") for t in toks[2:]):
+                    return "deny", "git rm -r on the whole project deletes every tracked file from disk"
             elif toks[1] == "commit":
                 r = check_commit(toks, cwd)
                 if r:
@@ -249,9 +264,13 @@ def check_file_tool(tool: str, ti: dict, cwd: Path, project: Path):
     if tool in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
         parts = [ti.get("content"), ti.get("new_string"), ti.get("new_source")]
         parts += [e.get("new_string") for e in ti.get("edits") or [] if isinstance(e, dict)]
-        name = find_secret("\n".join(str(x) for x in parts if x))
+        text = "\n".join(str(x) for x in parts if x)
+        name = find_secret(text)
         if name:
             return "deny", f"{tool} writes a {name} into '{path}', use an env variable instead"
+        m = RISKY_SCRIPT_RE.search(text)
+        if m:
+            return "ask", f"{tool} adds '{m.group(0).strip()}' to '{path}', a recursive delete on a variable, home or root path runs later without this check"
     if tool in ("Write", "Edit", "MultiEdit", "NotebookEdit") and path:
         p = _resolve(path, cwd)
         if not _inside(p, project):

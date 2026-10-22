@@ -79,6 +79,16 @@ TG = "1234567890:" + "AA" + r(33)
 PEM = "-----BEGIN " + "OPENSSH PRIVATE KEY-----"
 
 CASES += [
+    ("Bash", {"command": "rm -rf \"$(cygpath -u 'C:\\')\" 2>/dev/null"}, "deny"),
+    ("Bash", {"command": "git checkout --orphan test-connection && git rm -rf . --quiet"}, "deny"),
+    ("Write", {"file_path": "/tmp/x/test-lib-demo.sh", "content": "_HT_HOME=$(mktemp -d)\ntrap 'rm -rf \"$_HT_HOME\"' EXIT\n"}, "ask"),
+    ("Bash", {"command": "rm -rf ~/tt_workspace/data"}, "deny"),
+    ("Bash", {"command": "rm -rf .claude/worktrees"}, "ask"),
+    ("Bash", {"command": "rm -rf \"$BUILD_DIR\""}, "deny"),
+    ("Bash", {"command": "rm -f build.log 2>/dev/null"}, None),
+    ("Bash", {"command": "git rm --cached old.txt"}, None),
+    ("Write", {"file_path": f"{PROJECT}/clean.sh", "content": "rm -rf ./dist ./build\n"}, None),
+    ("Write", {"file_path": f"{PROJECT}/.gitignore", "content": "node_modules/\n*.log\n"}, None),
     ("Write", {"file_path": f"{PROJECT}/config.js", "content": f"const token = '{GH}';"}, "deny"),
     ("Edit", {"file_path": f"{PROJECT}/settings.py", "old_string": "KEY = ''", "new_string": f"KEY = '{AWS}'"}, "deny"),
     ("MultiEdit", {"file_path": f"{PROJECT}/bot.py", "edits": [{"old_string": "a", "new_string": f"TOKEN = '{TG}'"}]}, "deny"),
