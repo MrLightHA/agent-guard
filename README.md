@@ -131,7 +131,20 @@ python3 tests.py
 
 ## Limits
 
-This is a guard rail, not a sandbox. A determined agent can obfuscate commands (base64, scripts written to disk and run later). It stops the common accidents that actually happen, which is most of them. Keep backups off-machine and don't give agents production tokens.
+This is a guard rail, not a sandbox. Everything it checks is enforced by the hook, the agent can't talk its way past a deny. But an agent that is blocked can look for another route: write a Python script, compile something, use a different tool. Every refusal tells the agent to stop and ask you instead, and models usually follow that, but it's an instruction, not a guarantee.
+
+So treat agent-guard as one layer, not the whole defense.
+
+## Recommended setup
+
+The real protection is not giving the agent the power to do damage in the first place. agent-guard catches the accidents on top of that.
+
+- **Commit often.** Git can bring back anything committed. agent-guard protects `.git` and stops deletes outside the project, but uncommitted work is only as safe as your last commit.
+- **Don't give the agent real secrets.** Run a local test database, a local S3-compatible storage like [rustfs](https://github.com/rustfs/rustfs) instead of real AWS, or mocks of the APIs you use.
+- **If it needs a real cloud, give it a read-only key.** It can read settings and logs, but can't change or delete anything.
+- **Use a container or a devcontainer** when you can, and mount folders the agent shouldn't change as read-only (see [With devcontainers](#with-devcontainers)).
+
+Thanks to the founder of [Testinel](https://testinel.dev/) for these tips in the discussion on [DOU](https://dou.ua/forums/topic/62702/).
 
 ## License
 

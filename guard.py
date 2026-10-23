@@ -333,7 +333,9 @@ def main():
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": decision,
-            "permissionDecisionReason": f"[agent-guard] {reason}",
+            "permissionDecisionReason": f"[agent-guard] {reason}" + (
+                ". Do not try to do this another way (a script, another tool or command). Stop and ask the user."
+                if decision == "deny" else ""),
         }
     }))
     return 0
