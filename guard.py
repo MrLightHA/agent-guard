@@ -134,12 +134,27 @@ SHELL_RULES = [
 ]
 SHELL_RULES = [(re.compile(rx, re.I), d, r) for rx, d, r in SHELL_RULES]
 
-SPLIT_RE = re.compile(r"\s*(?:&&|\|\||;|\||\n)\s*")
 ROOTISH = {"/", "~", "~/", "$HOME", "${HOME}", "$HOME/", "/*", "~/*", "*", ".", "./", "..", "../", "C:\\", "C:/", "%USERPROFILE%"}
+WRAPPERS = {"sudo", "doas", "command", "builtin", "exec", "nohup", "time", "nice", "env", "stdbuf", "ionice", "timeout"}
+WRAPPER_FLAG_ARGS = {"-u", "-g", "-n", "-C", "-p", "-U", "-k", "-s"}
+SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "fish", "busybox"}
+PWSH = {"pwsh", "powershell", "pwsh.exe", "powershell.exe"}
+INTERPRETERS = {"python", "python3", "py", "node", "deno", "bun", "ruby", "perl", "php"}
+READERS = {
+    "cat", "less", "more", "head", "tail", "type", "bat", "nl", "xxd", "od", "strings",
+    "grep", "rg", "awk", "sed", "cp", "scp", "curl", "base64", "Get-Content", "gc",
+}
+GIT_GLOBAL_WITH_ARG = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path"}
+FIND_FILTERS = {"-name", "-iname", "-path", "-ipath", "-type", "-regex", "-iregex", "-newer", "-mtime", "-mmin", "-size", "-empty", "-user"}
+CODE_DELETE_RE = re.compile(
+    r"rmtree|os\.remove|os\.unlink|os\.rmdir|removedirs|\.unlink\(|\.rmdir\(|send2trash"
+    r"|rmSync|rmdirSync|unlinkSync|fs\.rm\(|fs\.promises\.rm|FileUtils\.rm|File\.delete|\bunlink\s*\(|\brmdir\s*\("
+)
+CODE_EXEC_RE = re.compile(r"os\.system|subprocess|child_process|execSync|spawnSync|\bsystem\s*\(|`")
+STRING_RE = re.compile(r"""(['"])(.*?)(?<!\\)\1""")
 
 
 def _win_path(t: str) -> str:
-    """Git Bash style /c/Users/... -> C:/Users/... (only on Windows)."""
     if os.name == "nt":
         m = re.match(r"^/([a-zA-Z])(/|$)(.*)", t)
         if m:
@@ -163,88 +178,257 @@ def _inside(p: Path, root: Path) -> bool:
         return False
 
 
-def check_rm(segment: str, cwd: Path, project: Path):
-    """Analyse an 'rm' invocation. Returns (decision, reason) or None."""
+def split_commands(cmd: str):
+    parts, cur, q, i, n = [], [], None, 0, len(cmd)
+    while i < n:
+        c = cmd[i]
+        if q:
+            cur.append(c)
+            if c == "\\" and q == '"' and i + 1 < n:
+                cur.append(cmd[i + 1])
+                i += 2
+                continue
+            if c == q:
+                q = None
+        elif c in "'\"":
+            q = c
+            cur.append(c)
+        elif c in ";\n" or (c in "&|" and not (cur and cur[-1] in "<>") and not (c == "&" and i + 1 < n and cmd[i + 1] == ">")):
+            parts.append("".join(cur))
+            cur = []
+            if c in "&|" and i + 1 < n and cmd[i + 1] == c:
+                i += 1
+        else:
+            cur.append(c)
+        i += 1
+    parts.append("".join(cur))
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _tokens(seg: str):
     try:
-        tokens = shlex.split(segment, posix=True)
+        t = shlex.split(seg, posix=True)
     except ValueError:
-        tokens = segment.split()
-    while tokens and (tokens[0] in ("sudo", "doas", "command", "builtin") or "=" in tokens[0]):
-        tokens = tokens[1:]
-    if not tokens or os.path.basename(tokens[0]) not in ("rm", "unlink", "shred"):
-        return None
+        t = seg.split()
+    while t and t[0] in ("(", "{", "!"):
+        t = t[1:]
+    return t
 
-    flags = "".join(t.lstrip("-") for t in tokens[1:] if t.startswith("-") and t != "--")
-    recursive = "r" in flags.lower() or "--recursive" in tokens
-    targets = [t for t in tokens[1:] if not t.startswith("-") and not re.match(r"^\d*[<>]", t)]
-    if "--no-preserve-root" in tokens:
-        return "deny", "rm --no-preserve-root"
 
+def _unwrap(tokens):
+    from_input = False
+    while tokens:
+        head = os.path.basename(tokens[0])
+        if re.match(r"^\w+=", tokens[0]):
+            tokens = tokens[1:]
+        elif head in WRAPPERS or head == "xargs":
+            from_input = from_input or head == "xargs"
+            tokens = tokens[1:]
+            while tokens and tokens[0].startswith("-"):
+                flag = tokens[0]
+                tokens = tokens[1:]
+                if (flag in WRAPPER_FLAG_ARGS or (head == "xargs" and flag in ("-I", "-n", "-P", "-d", "-L", "-s", "-E"))) and tokens:
+                    tokens = tokens[1:]
+            if head == "timeout" and tokens and re.match(r"^\d", tokens[0]):
+                tokens = tokens[1:]
+        else:
+            break
+    return tokens, from_input
+
+
+def check_targets(verb: str, targets, recursive: bool, cwd: Path, project: Path, from_input=False):
+    if from_input and not targets:
+        return ("deny" if recursive else "ask"), f"{verb} gets its targets from input, where they point can't be checked"
     for t in targets:
         if t in ROOTISH or t.rstrip("/") in ("~", "$HOME", "${HOME}", ""):
-            return "deny", f"rm targets '{t}' (home/root/whole directory)"
+            return "deny", f"{verb} targets '{t}' (home/root/whole directory)"
         if is_secret_path(t):
-            return "deny", f"rm targets a secret/key file '{t}'"
+            return "deny", f"{verb} targets a secret/key file '{t}'"
         if "$(" in t or "`" in t:
-            return ("deny" if recursive else "ask"), f"rm target '{t}' is computed at run time, where it points can't be checked"
+            return ("deny" if recursive else "ask"), f"{verb} target '{t}' is computed at run time, where it points can't be checked"
         if re.search(r"\$\{?\w", os.path.expandvars(os.path.expanduser(t))):
-            return ("deny" if recursive else "ask"), f"rm target '{t}' uses a variable that is not set here, where it points can't be checked"
+            return ("deny" if recursive else "ask"), f"{verb} target '{t}' uses a variable that is not set here, where it points can't be checked"
         p = _resolve(t, cwd)
         if ".git" in p.parts:
-            return "deny", "rm touches the .git directory (no undo after that)"
+            return "deny", f"{verb} touches the .git directory (no undo after that)"
         if p == project:
-            return "deny", "rm would delete the whole project"
+            return "deny", f"{verb} would delete the whole project"
         if not _inside(p, project):
-            return "deny", f"rm targets '{t}' outside the project ({project})"
+            return "deny", f"{verb} targets '{t}' outside the project ({project})"
         if recursive and ".claude" in p.parts:
             return "ask", f"recursive delete inside .claude ('{t}'), agent worktrees there may hold uncommitted work"
         if recursive and "*" in t and p.parent == project:
             return "ask", f"recursive wildcard delete in project root: '{t}'"
-    if recursive and not targets:
+    return None
+
+
+def check_rm(tokens, cwd: Path, project: Path, from_input=False):
+    if "--no-preserve-root" in tokens:
+        return "deny", "rm --no-preserve-root"
+    flags = "".join(t.lstrip("-") for t in tokens[1:] if t.startswith("-") and t != "--")
+    recursive = "r" in flags.lower() or "--recursive" in tokens
+    targets = [t for t in tokens[1:] if not t.startswith("-") and not re.match(r"^\d*[<>]", t)]
+    return check_targets(os.path.basename(tokens[0]), targets, recursive, cwd, project, from_input)
+
+
+def check_find(tokens, cwd: Path, project: Path):
+    destructive = "-delete" in tokens
+    for i, t in enumerate(tokens):
+        if t in ("-exec", "-execdir", "-ok", "-okdir") and i + 1 < len(tokens):
+            if os.path.basename(tokens[i + 1]) in ("rm", "unlink", "shred", "rmdir"):
+                destructive = True
+    if not destructive:
+        return None
+    paths = []
+    for t in tokens[1:]:
+        if t.startswith("-") or t in ("(", ")", "!"):
+            break
+        paths.append(t)
+    filtered = any(t in FIND_FILTERS for t in tokens)
+    for t in paths or ["."]:
+        if "$(" in t or "`" in t or re.search(r"\$\{?\w", os.path.expandvars(os.path.expanduser(t))):
+            return "deny", f"find deletes under '{t}', where it points can't be checked"
+        p = _resolve(t, cwd)
+        if not _inside(p, project) or t in ("/", "~", "~/"):
+            return "deny", f"find deletes under '{t}' outside the project ({project})"
+        if ".git" in p.parts:
+            return "deny", "find deletes inside .git (no undo after that)"
+        if p == project and not filtered:
+            return "deny", "find deletes everything in the project"
+    return None
+
+
+def check_inline_code(lang: str, code: str, cwd: Path, project: Path, depth: int):
+    literals = [m.group(2) for m in STRING_RE.finditer(code)]
+    for lit in literals:
+        if is_secret_path(lit):
+            return "deny", f"inline {lang} code reads secret file '{lit}'"
+    if CODE_EXEC_RE.search(code):
+        for lit in literals:
+            r = check_bash(lit, cwd, project, depth + 1)
+            if r and r[0] == "deny":
+                return r
+    if CODE_DELETE_RE.search(code):
+        if not literals:
+            return "ask", f"inline {lang} code deletes files, which ones can't be checked"
+        r = check_targets(lang, literals, True, cwd, project)
+        if r:
+            return r
+    return None
+
+
+def parse_git(tokens):
+    i = 1
+    while i < len(tokens):
+        t = tokens[i]
+        if t in GIT_GLOBAL_WITH_ARG:
+            i += 2
+        elif t.startswith("-"):
+            i += 1
+        else:
+            return t, tokens[i + 1:]
+    return None, []
+
+
+def check_git(verb, args, cwd: Path, project: Path):
+    short = "".join(a[1:] for a in args if a.startswith("-") and not a.startswith("--"))
+    longs = {a.split("=")[0] for a in args if a.startswith("--")}
+    plain = [a for a in args if not a.startswith("-")]
+    if verb == "push":
+        if longs & {"--force", "--force-with-lease", "--force-if-includes", "--mirror"} or "f" in short or any(a.startswith("+") for a in plain):
+            return "ask", "force push rewrites remote history"
+        if "--delete" in longs or "d" in short or any(a.startswith(":") and len(a) > 1 for a in plain):
+            return "ask", "push deletes a remote branch"
+    elif verb == "reset" and "--hard" in longs:
+        return "ask", "git reset --hard discards uncommitted work"
+    elif verb == "clean" and ("--force" in longs or "f" in short):
+        return "ask", "git clean deletes untracked files"
+    elif verb in ("checkout", "restore") and any(a in (".", "./", ":/") for a in plain):
+        return "ask", "discards all local changes"
+    elif verb == "branch" and ("D" in short or ("--delete" in longs and "--force" in longs)):
+        return "ask", "force-deletes a branch"
+    elif verb in ("filter-branch", "filter-repo"):
+        return "ask", "rewrites git history"
+    elif verb == "stash" and plain[:1] == ["clear"]:
+        return "ask", "git stash clear deletes all stashes"
+    elif verb == "add":
+        for a in plain:
+            if is_secret_path(a):
+                return "deny", f"git add of secret file '{a}'"
+    elif verb == "rm":
+        if "r" in short and any(a in (".", "./", "*", ":/", ":/*") for a in plain):
+            return "deny", "git rm -r on the whole project deletes every tracked file from disk"
+    elif verb == "commit":
+        return check_commit(["git", "commit", *args], cwd)
+    return None
+
+
+def check_segment(seg: str, cwd: Path, project: Path, depth: int):
+    tokens, from_input = _unwrap(_tokens(seg))
+    if not tokens:
+        return None
+    head = os.path.basename(tokens[0])
+    low = head.lower()
+    if tokens[0].startswith("$") or "$(" in tokens[0] or "`" in tokens[0]:
+        return "ask", f"the command '{tokens[0]}' is a variable or computed at run time, what runs can't be checked"
+    if head in ("rm", "unlink", "shred"):
+        return check_rm(tokens, cwd, project, from_input)
+    if head in READERS:
+        for t in tokens[1:]:
+            if not t.startswith("-") and is_secret_path(t):
+                return "deny", f"command reads secret file '{t}'"
+        return None
+    if head == "git":
+        verb, args = parse_git(tokens)
+        return check_git(verb, args, cwd, project) if verb else None
+    if head == "find":
+        return check_find(tokens, cwd, project)
+    if head == "eval":
+        return check_bash(" ".join(tokens[1:]), cwd, project, depth + 1)
+    if head in SHELLS:
+        for i, t in enumerate(tokens[1:], 1):
+            if t.startswith("-") and not t.startswith("--") and "c" in t and i + 1 < len(tokens):
+                return check_bash(tokens[i + 1], cwd, project, depth + 1)
+        return None
+    if low in PWSH:
+        for i, t in enumerate(tokens[1:], 1):
+            if t.lower() in ("-c", "-command") and i + 1 < len(tokens):
+                return check_bash(" ".join(tokens[i + 1:]), cwd, project, depth + 1)
+        return None
+    if low in ("cmd", "cmd.exe"):
+        for i, t in enumerate(tokens[1:], 1):
+            if t.lower() in ("/c", "/k") and i + 1 < len(tokens):
+                return check_bash(" ".join(tokens[i + 1:]), cwd, project, depth + 1)
+        return None
+    if head in INTERPRETERS or re.match(r"^python\d(\.\d+)?$", head):
+        for i, t in enumerate(tokens[1:], 1):
+            if t in ("-c", "-e", "--eval", "-r", "-E") and i + 1 < len(tokens):
+                return check_inline_code(head, tokens[i + 1], cwd, project, depth)
         return None
     return None
 
 
-def check_bash(cmd: str, cwd: Path, project: Path):
+def check_bash(cmd: str, cwd: Path, project: Path, depth: int = 0):
+    if depth > 4:
+        return "ask", "command is nested too deeply to check"
     worst = None
     for rx, decision, reason in SHELL_RULES:
         if rx.search(cmd):
             if decision == "deny":
                 return decision, reason
             worst = worst or (decision, reason)
-    for seg in SPLIT_RE.split(cmd):
-        seg = seg.strip().lstrip("(").strip()
-        if not seg:
+    assigned = {}
+    for seg in split_commands(cmd):
+        m = re.fullmatch(r"(\w+)=(\S*)", seg)
+        if m:
+            assigned[m.group(1)] = m.group(2).strip("'\"")
             continue
-        r = check_rm(seg, cwd, project)
+        if assigned:
+            seg = re.sub(r"\$\{?(\w+)\}?", lambda x: assigned.get(x.group(1), x.group(0)), seg)
+        r = check_segment(seg, cwd, project, depth)
         if r and r[0] == "deny":
             return r
         worst = worst or r
-        # reading secret files via shell (cat .env, type id_rsa, etc.)
-        try:
-            toks = shlex.split(seg)
-        except ValueError:
-            toks = seg.split()
-        if toks and os.path.basename(toks[0]) in (
-            "cat", "less", "more", "head", "tail", "type", "bat", "nl", "xxd", "od", "strings",
-            "grep", "rg", "awk", "sed", "cp", "scp", "curl", "base64", "Get-Content", "gc",
-        ):
-            for t in toks[1:]:
-                if not t.startswith("-") and is_secret_path(t):
-                    return "deny", f"command reads secret file '{t}'"
-        if len(toks) > 1 and os.path.basename(toks[0]) == "git":
-            if toks[1] == "add":
-                for t in toks[2:]:
-                    if not t.startswith("-") and is_secret_path(t):
-                        return "deny", f"git add of secret file '{t}'"
-            elif toks[1] == "rm":
-                flags = "".join(t.lstrip("-") for t in toks[2:] if t.startswith("-") and t != "--")
-                if "r" in flags and any(t in (".", "./", "*", ":/", ":/*") for t in toks[2:]):
-                    return "deny", "git rm -r on the whole project deletes every tracked file from disk"
-            elif toks[1] == "commit":
-                r = check_commit(toks, cwd)
-                if r:
-                    return r
     name = find_secret(cmd)
     if name and re.search(r">|\btee\b|\bsed\s+-i|\bgit\s+commit|Set-Content|Out-File|Add-Content", cmd):
         return "deny", f"command writes a {name} into a file, use an env variable instead"
