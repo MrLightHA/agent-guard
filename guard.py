@@ -205,7 +205,17 @@ def split_commands(cmd: str):
     return [p.strip() for p in parts if p.strip()]
 
 
+def _cmd_name(tok: str) -> str:
+    name = re.split(r"[\\/]", tok)[-1]
+    return name[:-4] if name.lower().endswith(".exe") else name
+
+
+def _is_root_like(t: str) -> bool:
+    return bool(re.fullmatch(r"[\\/]+|[A-Za-z]:[\\/]*|[\\/]+\*|[A-Za-z]:[\\/]+\*", t))
+
+
 def _tokens(seg: str):
+    seg = re.sub(r"(?<![\w$])([A-Za-z]:\\[^\s\"']*)", lambda m: m.group(1).replace("\\", "/"), seg)
     try:
         t = shlex.split(seg, posix=True)
     except ValueError:
@@ -218,7 +228,7 @@ def _tokens(seg: str):
 def _unwrap(tokens):
     from_input = False
     while tokens:
-        head = os.path.basename(tokens[0])
+        head = _cmd_name(tokens[0])
         if re.match(r"^\w+=", tokens[0]):
             tokens = tokens[1:]
         elif head in WRAPPERS or head == "xargs":
@@ -240,8 +250,10 @@ def check_targets(verb: str, targets, recursive: bool, cwd: Path, project: Path,
     if from_input and not targets:
         return ("deny" if recursive else "ask"), f"{verb} gets its targets from input, where they point can't be checked"
     for t in targets:
-        if t in ROOTISH or t.rstrip("/") in ("~", "$HOME", "${HOME}", ""):
+        if t in ROOTISH or t.rstrip("/") in ("~", "$HOME", "${HOME}", "") or _is_root_like(t):
             return "deny", f"{verb} targets '{t}' (home/root/whole directory)"
+        if re.search(r"~\d", t):
+            return "deny", f"{verb} target '{t}' uses a Windows short (8.3) name, where it points can't be checked"
         if is_secret_path(t):
             return "deny", f"{verb} targets a secret/key file '{t}'"
         if "$(" in t or "`" in t:
@@ -268,14 +280,14 @@ def check_rm(tokens, cwd: Path, project: Path, from_input=False):
     flags = "".join(t.lstrip("-") for t in tokens[1:] if t.startswith("-") and t != "--")
     recursive = "r" in flags.lower() or "--recursive" in tokens
     targets = [t for t in tokens[1:] if not t.startswith("-") and not re.match(r"^\d*[<>]", t)]
-    return check_targets(os.path.basename(tokens[0]), targets, recursive, cwd, project, from_input)
+    return check_targets(_cmd_name(tokens[0]), targets, recursive, cwd, project, from_input)
 
 
 def check_find(tokens, cwd: Path, project: Path):
     destructive = "-delete" in tokens
     for i, t in enumerate(tokens):
         if t in ("-exec", "-execdir", "-ok", "-okdir") and i + 1 < len(tokens):
-            if os.path.basename(tokens[i + 1]) in ("rm", "unlink", "shred", "rmdir"):
+            if _cmd_name(tokens[i + 1]) in ("rm", "unlink", "shred", "rmdir"):
                 destructive = True
     if not destructive:
         return None
@@ -367,7 +379,7 @@ def check_segment(seg: str, cwd: Path, project: Path, depth: int):
     tokens, from_input = _unwrap(_tokens(seg))
     if not tokens:
         return None
-    head = os.path.basename(tokens[0])
+    head = _cmd_name(tokens[0])
     low = head.lower()
     if tokens[0].startswith("$") or "$(" in tokens[0] or "`" in tokens[0]:
         return "ask", f"the command '{tokens[0]}' is a variable or computed at run time, what runs can't be checked"

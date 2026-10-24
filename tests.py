@@ -66,6 +66,13 @@ CASES = [
     ("Bash", {"command": 'python3 -c "import os; os.remove(\'build/tmp.txt\')"'}, None),
     ("Bash", {"command": 'ls 2>&1 | head'}, None),
     ("Bash", {"command": "bash -c 'cd src && rm -rf dist'"}, None),
+    # Windows incidents #92593 #97660 #99193
+    ("Bash", {"command": 'rm -rf "\\\\"'}, 'deny'),
+    ("Bash", {"command": '& C:\\msys64\\usr\\bin\\bash.exe -lc "export X=$(mktemp -d); rm -rf $X"'}, 'deny'),
+    ("Bash", {"command": 'rm -rf C:/Users/ADMINI~1'}, 'deny'),
+    ("Bash", {"command": 'rm -rf C:\\'}, 'deny'),
+    ("Bash", {"command": 'C:\\Git\\bin\\git.exe push --force origin main'}, 'ask'),
+    ("Bash", {"command": 'rm -rf ./build~old'}, None),
     # must NOT block normal work
     ("Read", {"file_path": f"{PROJECT}/test.env.example"}, None),
     ("Read", {"file_path": f"{PROJECT}/src/environment.ts"}, None),
