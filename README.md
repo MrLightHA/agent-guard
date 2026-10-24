@@ -144,7 +144,7 @@ The real protection is not giving the agent the power to do damage in the first 
 - **If it needs a real cloud, give it a read-only key.** It can read settings and logs, but can't change or delete anything.
 - **Use a container or a devcontainer** when you can, and mount folders the agent shouldn't change as read-only (see [With devcontainers](#with-devcontainers)).
 
-Thanks to the founder of [Testinel](https://testinel.dev/) for these tips in the discussion on [DOU](https://dou.ua/forums/topic/62702/).
+Thanks to [Volodymyr Obrizan](https://github.com/obrizan), founder of [Testinel](https://testinel.dev/), for these tips in the discussion on [DOU](https://dou.ua/forums/topic/62702/).
 
 ## License
 
