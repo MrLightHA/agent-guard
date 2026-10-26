@@ -89,8 +89,10 @@ CASES = [
 ]
 
 
-def run(tool, ti, project=PROJECT):
+def run(tool, ti, project=PROJECT, mode=None):
     event = {"tool_name": tool, "tool_input": ti, "cwd": project, "session_id": "test", "hook_event_name": "PreToolUse"}
+    if mode:
+        event["permission_mode"] = mode
     env = dict(os.environ, CLAUDE_PROJECT_DIR=project, AGENT_GUARD_LOG=str(HERE / ".test-log.jsonl"))
     env.pop("AGENT_GUARD_MODE", None)
     out = subprocess.run([sys.executable, str(HERE / "guard.py")], input=json.dumps(event),
@@ -179,6 +181,19 @@ with tempfile.TemporaryDirectory() as d:
         fails += not ok
         CASES.append(None)
         print(f"{'OK ' if ok else 'FAIL'} git   {str(got):5} (want {str(want):5}) {name}" + (f"  <- {reason}" if reason else ""))
+
+for mode, cmd, want in [
+    ("bypassPermissions", "git reset --hard", "deny"),
+    ("auto", "git push --force origin main", "deny"),
+    ("default", "git reset --hard", "ask"),
+    ("acceptEdits", "git clean -fd", "ask"),
+    ("bypassPermissions", "npm test", None),
+]:
+    got, reason = run("Bash", {"command": cmd}, mode=mode)
+    ok = got == want
+    fails += not ok
+    CASES.append(None)
+    print(f"{'OK ' if ok else 'FAIL'} mode  {str(got):5} (want {str(want):5}) {mode}: {cmd}" + (f"  <- {reason}" if reason else ""))
 
 log = (HERE / ".test-log.jsonl").read_text(encoding="utf-8")
 leaked = OAI in log or GH in log

@@ -45,6 +45,8 @@ In every case the agent did not try to work around the guard.
 | Remote code | `curl … \| bash` | **deny** |
 | Risky but sometimes legit | `git push --force`, `git reset --hard`, `printenv`, `$API_KEY`, writes outside the project | **ask you** |
 
+**ask** only works if someone is there to answer. In a session started with `--dangerously-skip-permissions` or in auto mode nobody is asked, so agent-guard turns every **ask** into **deny** there. Set `AGENT_GUARD_UNATTENDED=ask` if you really want the old behavior.
+
 Everything else passes. `rm -rf node_modules`, `.env.example`, normal edits are untouched. Obvious placeholders like `sk-your-key-here` or `AKIAIOSFODNN7EXAMPLE` are not treated as keys, and keys are redacted in the log.
 
 Every tool call is logged to `~/.agent-guard/log.jsonl`:

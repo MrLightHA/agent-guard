@@ -478,7 +478,18 @@ def check_file_tool(tool: str, ti: dict, cwd: Path, project: Path):
 
 # ------------------------------------------------------------------ main ---
 
+UNATTENDED_MODES = {"bypasspermissions", "auto"}
+
+
 def decide(event: dict):
+    r = _decide(event)
+    mode = str(event.get("permission_mode") or "").lower()
+    if r and r[0] == "ask" and mode in UNATTENDED_MODES and os.environ.get("AGENT_GUARD_UNATTENDED") != "ask":
+        return "deny", f"{r[1]} (this session runs in {event.get('permission_mode')} mode, so nobody would be asked and it is blocked instead)"
+    return r
+
+
+def _decide(event: dict):
     tool = event.get("tool_name", "")
     ti = event.get("tool_input") or {}
     cwd = Path(_win_path(event.get("cwd") or os.getcwd()))
