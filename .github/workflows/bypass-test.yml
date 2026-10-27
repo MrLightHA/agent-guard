@@ -1,0 +1,21 @@
+# paveo test on every push and pull request: a change that lets one of the
+# known bypass spellings past guard.py fails this check.
+name: bypass test
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  paveo-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install agent-guard for the runner's user
+        run: python3 install.py
+      - uses: paveo-dev/paveo@f54262c112962f33b730f71ac2e57908c9d0f4d3 # v0.1.11
+        with:
+          version: "0.1.11"
+          expect: force-push delete hard-reset clean secrets
